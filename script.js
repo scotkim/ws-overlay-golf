@@ -3,6 +3,7 @@
   const DATA_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQ6aWHCjlRHWl-HFOCcGJnBPhUD6--IbIQWpfXqmhNL-4K5ay9UdHWXyQc2fmMGBPh_f4dRDjsBlzMf/pub?gid=298849976&single=true&output=csv';
   const CURRENT_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQ6aWHCjlRHWl-HFOCcGJnBPhUD6--IbIQWpfXqmhNL-4K5ay9UdHWXyQc2fmMGBPh_f4dRDjsBlzMf/pub?gid=74658754&single=true&output=csv';
   const REFRESH_MS = Number(new URLSearchParams(location.search).get('ms') || 5_000); // default 5s; override with ?ms=
+  const HARD_RELOAD_MS = Number(new URLSearchParams(location.search).get('reloadMs') || 300_000); // default 5min; override with ?reloadMs=
 
   const elBody = document.getElementById('board-body');
   const elHole = document.getElementById('hole-number');
@@ -38,6 +39,7 @@
   const CONFIRM_SNAPSHOT = (params.get('confirm') ?? '0') !== '0'; // default off
   const STABILIZE = (params.get('stabilize') ?? '1') !== '0';
   const STABILIZE_CYCLES = Math.max(1, Number(params.get('stabilizeCycles') || 2));
+  const STABILIZE_HEADER_CYCLES = Math.max(1, Number(params.get('stabilizeHeaderCycles') || 1));
   const CONFIRM_DELAY_MS = Number(params.get('confirmDelayMs') || 300);
 
   // Refresh loop control
@@ -348,12 +350,45 @@
 
   function extractCurrentFromMergedRows(rows) {
     if (!rows || rows.length === 0) return null;
-    const any = rows.find(r => (r.current_hole || r.hole || r.current_par || r.par || r.golf_course || r['golf course'] || r.golfCourse || r.course));
-    if (!any) return null;
-    const hole = (any.current_hole || any.hole || '').toString();
-    const par = (any.current_par || any.par || '').toString();
-    const course = (any.golf_course || any['golf course'] || any.golfCourse || any.course || '').toString().trim();
-    return { current_hole: hole, current_par: par, golf_course: course };
+    const pairCounts = new Map(); // key: h|p
+    const holeCounts = new Map();
+    const parCounts = new Map();
+    const courseCounts = new Map();
+    for (const r of rows) {
+      const h = toInt(r.current_hole ?? r.hole ?? null);
+      const p = toInt(r.current_par ?? r.par ?? null);
+      const c = (r.golf_course || r['golf course'] || r.golfCourse || r.course || '').toString().trim();
+      if (h != null || p != null) {
+        const key = `${h ?? ''}|${p ?? ''}`;
+        pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+      }
+      if (h != null) holeCounts.set(h, (holeCounts.get(h) || 0) + 1);
+      if (p != null) parCounts.set(p, (parCounts.get(p) || 0) + 1);
+      if (c) courseCounts.set(c, (courseCounts.get(c) || 0) + 1);
+    }
+    let bestH = null, bestP = null;
+    if (pairCounts.size) {
+      let bestKey = null, bestCnt = -1;
+      for (const [k, cnt] of pairCounts.entries()) {
+        if (cnt > bestCnt) { bestCnt = cnt; bestKey = k; }
+        else if (cnt === bestCnt) {
+          // tie-breaker: prefer larger hole number
+          const [kh] = k.split('|');
+          const [bh] = (bestKey || '|').split('|');
+          const kih = toInt(kh), bih = toInt(bh);
+          if ((kih ?? -1) > (bih ?? -1)) bestKey = k;
+        }
+      }
+      const [kh, kp] = (bestKey || '|').split('|');
+      bestH = toInt(kh); bestP = toInt(kp);
+    } else {
+      // fallbacks
+      if (holeCounts.size) bestH = [...holeCounts.entries()].sort((a,b)=>b[1]-a[1] || (a[0]-b[0]))[0][0];
+      if (parCounts.size) bestP = [...parCounts.entries()].sort((a,b)=>b[1]-a[1] || (a[0]-b[0]))[0][0];
+    }
+    const course = courseCounts.size ? [...courseCounts.entries()].sort((a,b)=>b[1]-a[1])[0][0] : '';
+    if (bestH == null && bestP == null && !course) return null;
+    return { current_hole: bestH != null ? String(bestH) : '', current_par: bestP != null ? String(bestP) : '', golf_course: course };
   }
 
   // Optional: Apps Script Web App JSON endpoint for fully consistent snapshot
@@ -553,12 +588,12 @@
           if ((ch && hole && ch !== hole) || (cp && par && cp !== par)) {
             // mismatch detected; keep last good to avoid flicker
           } else {
-          const newHole = hole || ch;
-          const newPar = par || cp;
-          // Enforce monotonic non-decreasing hole to avoid rollbacks
-          if (MONOTONIC_HOLE && lastGoodCurrent && toInt(newHole) != null && toInt(lastGoodCurrent.hole) != null && toInt(newHole) < toInt(lastGoodCurrent.hole)) {
-            // ignore hole rollback
-          } else {
+            const newHole = hole || ch;
+            const newPar = par || cp;
+            // Enforce monotonic non-decreasing hole to avoid rollbacks
+            if (MONOTONIC_HOLE && lastGoodCurrent && toInt(newHole) != null && toInt(lastGoodCurrent.hole) != null && toInt(newHole) < toInt(lastGoodCurrent.hole)) {
+              // ignore hole rollback
+            } else {
               const candidate = { hole: newHole, par: newPar, course };
               if (!STABILIZE) { lastGoodCurrent = candidate; updatedOk = true; }
               else {
@@ -568,9 +603,9 @@
                   pendingCurrent = { ...candidate, seen: 1 };
                 }
                 if (!lastGoodCurrent) { lastGoodCurrent = candidate; updatedOk = true; pendingCurrent = null; }
-                else if (pendingCurrent.seen >= STABILIZE_CYCLES) { lastGoodCurrent = candidate; updatedOk = true; pendingCurrent = null; }
+                else if (pendingCurrent.seen >= STABILIZE_HEADER_CYCLES) { lastGoodCurrent = candidate; updatedOk = true; pendingCurrent = null; }
               }
-          }
+            }
           }
         } else {
           if (MONOTONIC_HOLE && lastGoodCurrent && toInt(hole) != null && toInt(lastGoodCurrent.hole) != null && toInt(hole) < toInt(lastGoodCurrent.hole)) {
@@ -585,7 +620,7 @@
                 pendingCurrent = { ...candidate, seen: 1 };
               }
               if (!lastGoodCurrent) { lastGoodCurrent = candidate; updatedOk = true; pendingCurrent = null; }
-              else if (pendingCurrent.seen >= STABILIZE_CYCLES) { lastGoodCurrent = candidate; updatedOk = true; pendingCurrent = null; }
+              else if (pendingCurrent.seen >= STABILIZE_HEADER_CYCLES) { lastGoodCurrent = candidate; updatedOk = true; pendingCurrent = null; }
             }
           }
         }
@@ -689,4 +724,10 @@
   }
 
   setupBannerRotation();
+
+  // Hard reload every 5 minutes to avoid any long-lived cache drift
+  setInterval(() => {
+    try { console.debug && console.debug('Hard reload tick'); } catch {}
+    location.reload();
+  }, HARD_RELOAD_MS);
 })();
