@@ -20,9 +20,21 @@
       </section>
       <section class="dock bottom-right">
         <div class="panel">
+          <div class="banner">
+            <img id="banner-img" alt="Banner" width="340" height="100" />
+          </div>
           <div class="header" id="header">
-            <div class="hole-number" id="hole-number">-</div>
-            <div class="hole-par" id="hole-par">PAR -</div>
+            <div class="header-left">
+              <div class="hole-number" id="hole-number">-</div>
+              <div class="hole-par" id="hole-par">PAR -</div>
+            </div>
+            <div class="header-right">
+              <div class="header-datetime">
+                <div class="date" id="header-date">-</div>
+                <div class="time" id="header-time">-</div>
+                <div class="last-updated" id="last-updated">마지막 갱신 --:--:--</div>
+              </div>
+            </div>
           </div>
           <div class="board" id="board">
             <div class="board-head">
@@ -33,7 +45,6 @@
             </div>
             <div class="board-body" id="board-body"></div>
           </div>
-          <div class="update-bar"><span id="last-updated">마지막 갱신 --:--:--</span></div>
           <div class="description" id="description">
             <span id="desc-text">골프장 이름</span>
           </div>

@@ -2,7 +2,7 @@
 (function () {
   const DATA_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQ6aWHCjlRHWl-HFOCcGJnBPhUD6--IbIQWpfXqmhNL-4K5ay9UdHWXyQc2fmMGBPh_f4dRDjsBlzMf/pub?gid=298849976&single=true&output=csv';
   const CURRENT_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQ6aWHCjlRHWl-HFOCcGJnBPhUD6--IbIQWpfXqmhNL-4K5ay9UdHWXyQc2fmMGBPh_f4dRDjsBlzMf/pub?gid=74658754&single=true&output=csv';
-  const REFRESH_MS = 6_000; // 6 seconds per request
+  const REFRESH_MS = Number(new URLSearchParams(location.search).get('ms') || 5_000); // default 5s; override with ?ms=
 
   const elBody = document.getElementById('board-body');
   const elHole = document.getElementById('hole-number');
@@ -11,6 +11,9 @@
   const elParTL = document.getElementById('tl-hole-par');
   const elDesc = document.getElementById('desc-text');
   const elLastUpdated = document.getElementById('last-updated');
+  const elHeaderDate = document.getElementById('header-date');
+  const elHeaderTime = document.getElementById('header-time');
+  const elBanner = document.getElementById('banner-img');
 
   // URL params allow simple customization (e.g., ?desc=Augusta%20National)
   const params = new URLSearchParams(location.search);
@@ -20,20 +23,30 @@
   // Optional: use Google Sheets API for near real-time updates (bypasses publish cache)
   const SHEETS_API_KEY = params.get('apiKey') || params.get('key') || '';
   const SPREADSHEET_ID = params.get('sheetId') || params.get('id') || '';
+  const APP_URL = params.get('appUrl') || '';
+  const SINGLE_SHEET = (params.get('single') ?? params.get('singleSheet') ?? '1') !== '0';
   const PLAYERS_GID = Number(params.get('playersGid') || params.get('dataGid') || 298849976);
   const CURRENT_GID = Number(params.get('currentGid') || 74658754);
   const CONTROL_GID = Number(params.get('controlGid') || 0);
-  const PLAYERS_RANGE = params.get('playersRange') || 'A:C';
+  const PLAYERS_RANGE = params.get('playersRange') || 'A:Z';
   const CURRENT_RANGE = params.get('currentRange') || 'A:Z';
   const CONTROL_RANGE = params.get('controlRange') || 'A:Z';
   const MONOTONIC_HOLE = (params.get('monotonicHole') ?? '1') !== '0';
-  const STRICT_GS_MONOTONIC = (params.get('strictGs') ?? '1') !== '0';
+  const STRICT_GS_MONOTONIC = (params.get('strictGs') ?? '0') !== '0'; // default off for speed
+  const ENFORCE_STABLE_NAMES = (params.get('stableNames') ?? '0') === '1';
+  const REQUIRE_COHERENCE = (params.get('coherent') ?? '0') === '1';
+  const CONFIRM_SNAPSHOT = (params.get('confirm') ?? '0') !== '0'; // default off
+  const STABILIZE = (params.get('stabilize') ?? '1') !== '0';
+  const STABILIZE_CYCLES = Math.max(1, Number(params.get('stabilizeCycles') || 2));
+  const CONFIRM_DELAY_MS = Number(params.get('confirmDelayMs') || 300);
 
   // Refresh loop control
   let isRefreshing = false;
   let nextTimer = null;
   let lastGoodPlayers = [];
   let lastGoodCurrent = null; // {hole, par, course}
+  let pendingPlayers = new Map(); // name -> { spt, gs, seen }
+  let pendingCurrent = null; // { hole, par, course, seen }
 
   function parseCSV(text) {
     const rows = [];
@@ -96,7 +109,7 @@
 
   function formatSPT(n) {
     if (n == null) return '';
-    if (n === 0) return 'E';
+    if (n === 0) return '0';
     return n > 0 ? `+${n}` : String(n);
   }
 
@@ -107,6 +120,19 @@
     const mm = pad2(now.getMinutes());
     const ss = pad2(now.getSeconds());
     elLastUpdated.textContent = `마지막 갱신 ${hh}:${mm}:${ss}`;
+  }
+
+  function updateHeaderDatetimeNY(now = new Date()) {
+    const tz = 'America/New_York';
+    // Extract month/day/weekday parts to insert "월", "일"
+    const parts = new Intl.DateTimeFormat('ko-KR', { timeZone: tz, month: 'numeric', day: 'numeric', weekday: 'long' }).formatToParts(now);
+    const month = parts.find(p => p.type === 'month')?.value || '';
+    const day = parts.find(p => p.type === 'day')?.value || '';
+    const weekday = parts.find(p => p.type === 'weekday')?.value || '';
+    const dateLine = `${month}월 ${day}일 ${weekday}`;
+    const timeLine = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).format(now).replace(/\s/g, '');
+    if (elHeaderDate) elHeaderDate.textContent = dateLine;
+    if (elHeaderTime) elHeaderTime.textContent = timeLine;
   }
 
   function toInt(val) {
@@ -127,6 +153,43 @@
       }
       return np;
     });
+  }
+
+  function stabilizeCommitPlayers(newPlayers) {
+    if (!STABILIZE || lastGoodPlayers.length === 0) {
+      // Bootstrap or disabled: accept immediately (with optional GS monotonic merge)
+      return mergePlayersMonotonic(newPlayers, lastGoodPlayers);
+    }
+    const nextMap = new Map(lastGoodPlayers.map(p => [p.name, { ...p }]));
+    let anyCommit = false;
+    for (const np of newPlayers) {
+      const op = nextMap.get(np.name);
+      const changed = !op || op.spt !== np.spt || op.gs !== np.gs;
+      if (!changed) { pendingPlayers.delete(np.name); continue; }
+      const pend = pendingPlayers.get(np.name);
+      if (pend && pend.spt === np.spt && pend.gs === np.gs) {
+        pend.seen += 1;
+      } else {
+        pendingPlayers.set(np.name, { spt: np.spt, gs: np.gs, seen: 1 });
+      }
+      const seen = (pendingPlayers.get(np.name)?.seen) || 0;
+      if (seen >= STABILIZE_CYCLES) {
+        const base = op || { name: np.name, spt: np.spt, gs: np.gs };
+        base.spt = np.spt;
+        base.gs = np.gs;
+        nextMap.set(np.name, base);
+        pendingPlayers.delete(np.name);
+        anyCommit = true;
+      }
+    }
+    // Optionally keep existing players even if missing in new snapshot to avoid flicker
+    const committed = Array.from(nextMap.values());
+    return mergePlayersMonotonic(committed, lastGoodPlayers);
+  }
+
+  function eqCurrent(a, b) {
+    if (!a || !b) return false;
+    return String(a.hole||'') === String(b.hole||'') && String(a.par||'') === String(b.par||'') && String(a.course||'') === String(b.course||'');
   }
 
   function fetchCSV(url) {
@@ -187,6 +250,44 @@
     return valueRanges.map(v => v.values || []);
   }
 
+  async function fetchSnapshot(titleMap) {
+    const playersTitle = titleMap[PLAYERS_GID];
+    const currentTitle = titleMap[CURRENT_GID];
+    const controlTitle = titleMap[CONTROL_GID];
+    if (!playersTitle) throw new Error('Cannot resolve players sheet title');
+    let playersValues = [];
+    let currentValues = [];
+    let controlValues = [];
+    if (SINGLE_SHEET) {
+      // Only read players sheet; current will be derived from its rows
+      playersValues = await fetchValuesByTitle(playersTitle, PLAYERS_RANGE);
+    } else {
+      try {
+        const arr = await fetchBatchValues(playersTitle, PLAYERS_RANGE, currentTitle, CURRENT_RANGE, controlTitle, CONTROL_RANGE);
+        playersValues = arr[0] || [];
+        currentValues = arr[1] || [];
+        controlValues = arr[2] || [];
+      } catch (e) {
+        const promises = [
+          fetchValuesByTitle(playersTitle, PLAYERS_RANGE),
+          fetchValuesByTitle(currentTitle, CURRENT_RANGE)
+        ];
+        if (controlTitle) promises.push(fetchValuesByTitle(controlTitle, CONTROL_RANGE));
+        const arr2 = await Promise.all(promises);
+        playersValues = arr2[0] || [];
+        currentValues = arr2[1] || [];
+        controlValues = arr2[2] || [];
+      }
+    }
+    return { playersValues, currentValues, controlValues };
+  }
+
+  function signatureFor(players, current) {
+    const head = `${current.current_hole || current.hole || ''}|${current.current_par || current.par || ''}|${current.golf_course || current['golf course'] || current.course || ''}`;
+    const body = players.map(p => `${p.name}|${p.spt}|${p.gs}`).join(';');
+    return head + '||' + body;
+  }
+
   function shallowEqualPlayers(a, b) {
     if (!a || !b || a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) {
@@ -245,6 +346,29 @@
     });
   }
 
+  function extractCurrentFromMergedRows(rows) {
+    if (!rows || rows.length === 0) return null;
+    const any = rows.find(r => (r.current_hole || r.hole || r.current_par || r.par || r.golf_course || r['golf course'] || r.golfCourse || r.course));
+    if (!any) return null;
+    const hole = (any.current_hole || any.hole || '').toString();
+    const par = (any.current_par || any.par || '').toString();
+    const course = (any.golf_course || any['golf course'] || any.golfCourse || any.course || '').toString().trim();
+    return { current_hole: hole, current_par: par, golf_course: course };
+  }
+
+  // Optional: Apps Script Web App JSON endpoint for fully consistent snapshot
+  async function fetchAppSnapshot() {
+    const url = APP_URL + (APP_URL.includes('?') ? '&' : '?') + 'ts=' + Date.now();
+    const res = await fetch(url, { cache: 'no-store', mode: 'cors', credentials: 'omit' });
+    if (!res.ok) throw new Error('App URL error ' + res.status);
+    const json = await res.json();
+    // Expected shape:
+    // { players: [{name, spt, gs}], current: { current_hole, current_par, golf_course }, sig?: string }
+    const players = Array.isArray(json.players) ? json.players : [];
+    const current = json.current || {};
+    return { players, current, sig: json.sig || '' };
+  }
+
   function computeDenseRanks(players) {
     let lastSPT = null;
     let rank = 0;
@@ -280,7 +404,18 @@
       // SPT
       const cSPT = document.createElement('div');
       cSPT.className = 'col spt';
-      cSPT.textContent = formatSPT(p.spt);
+      const sptVal = p.spt;
+      if (sptVal == null || !Number.isFinite(sptVal)) {
+        cSPT.textContent = '';
+      } else {
+        const badge = document.createElement('span');
+        badge.className = 'spt-badge';
+        badge.textContent = formatSPT(sptVal);
+        if (sptVal > 0) badge.classList.add('pos');
+        else if (sptVal < 0) badge.classList.add('neg');
+        else badge.classList.add('zero');
+        cSPT.appendChild(badge);
+      }
       // GS
       const cGS = document.createElement('div');
       cGS.className = 'col gs';
@@ -299,44 +434,65 @@
       let currentRows = [];
       let updatedOk = false;
 
-      if (SHEETS_API_KEY && SPREADSHEET_ID) {
+      if (APP_URL) {
+        // Use Apps Script (or custom) JSON endpoint if provided: most consistent + fastest
+        const snap = await fetchAppSnapshot();
+        dataRows = (snap.players || []).map(p => ({ name: p.name, SPT: p.spt, GS: p.gs }));
+        currentRows = [snap.current || {}];
+        var controlCur = null;
+      } else if (SHEETS_API_KEY && SPREADSHEET_ID) {
         // Fast path using Sheets API (batch) — consistent snapshot and minimal quota.
         const titleMap = await getSheetTitleMap();
-        const playersTitle = titleMap[PLAYERS_GID];
-        const currentTitle = titleMap[CURRENT_GID];
-        const controlTitle = titleMap[CONTROL_GID];
-        if (!playersTitle || !currentTitle) throw new Error('Cannot resolve sheet titles from gid');
-        let playersValues = [];
-        let currentValues = [];
-        let controlValues = [];
-        try {
-          const arr = await fetchBatchValues(playersTitle, PLAYERS_RANGE, currentTitle, CURRENT_RANGE, controlTitle, CONTROL_RANGE);
-          playersValues = arr[0] || [];
-          currentValues = arr[1] || [];
-          controlValues = arr[2] || [];
-        } catch (e) {
-          // Fallback to individual calls if batch fails
-          const promises = [
-            fetchValuesByTitle(playersTitle, PLAYERS_RANGE),
-            fetchValuesByTitle(currentTitle, CURRENT_RANGE)
-          ];
-          if (controlTitle) promises.push(fetchValuesByTitle(controlTitle, CONTROL_RANGE));
-          const arr2 = await Promise.all(promises);
-          playersValues = arr2[0] || [];
-          currentValues = arr2[1] || [];
-          controlValues = arr2[2] || [];
+        let snap1 = await fetchSnapshot(titleMap);
+        let dataRows1 = rowsToObjectsFromValues(snap1.playersValues);
+        let currentRows1 = SINGLE_SHEET ? [] : rowsToObjectsFromValues(snap1.currentValues);
+        let controlCur1 = extractCurrentFromControl(snap1.controlValues);
+
+        if (CONFIRM_SNAPSHOT) {
+          await new Promise(r => setTimeout(r, Math.max(0, CONFIRM_DELAY_MS)));
+          const snap2 = await fetchSnapshot(titleMap);
+          const dataRows2 = rowsToObjectsFromValues(snap2.playersValues);
+          const currentRows2 = SINGLE_SHEET ? [] : rowsToObjectsFromValues(snap2.currentValues);
+          let cur1 = currentRows1[0] || {};
+          let cur2 = currentRows2[0] || {};
+          if (SINGLE_SHEET) {
+            cur1 = extractCurrentFromMergedRows(dataRows1) || {};
+            cur2 = extractCurrentFromMergedRows(dataRows2) || {};
+          }
+          const sig1 = signatureFor(dataRows1.map(r=>({name:r.name,spt:parseSPT(r.SPT??r.spt??r.to_par??r.ToPar??r.스코어??''),gs:r.GS??r.gs??r.gross??r.합계??''})), cur1);
+          const sig2 = signatureFor(dataRows2.map(r=>({name:r.name,spt:parseSPT(r.SPT??r.spt??r.to_par??r.ToPar??r.스코어??''),gs:r.GS??r.gs??r.gross??r.합계??''})), cur2);
+          if (sig1 !== sig2) {
+            // Prefer the newer snapshot (snap2)
+            snap1 = snap2;
+            dataRows1 = dataRows2;
+            currentRows1 = currentRows2;
+            controlCur1 = extractCurrentFromControl(snap2.controlValues);
+          }
         }
-        dataRows = rowsToObjectsFromValues(playersValues);
-        currentRows = rowsToObjectsFromValues(currentValues);
-        var controlCur = extractCurrentFromControl(controlValues);
+
+        dataRows = dataRows1;
+        if (SINGLE_SHEET) {
+          const mergedCur = extractCurrentFromMergedRows(dataRows1);
+          currentRows = mergedCur ? [mergedCur] : [];
+        } else {
+          currentRows = currentRows1;
+        }
+        var controlCur = controlCur1;
       } else {
         // Fallback to published CSV (subject to 5-min cache)
-        const [dataCsv, currentCsv] = await Promise.all([
-          fetchCSV(DATA_URL),
-          fetchCSV(CURRENT_URL)
-        ]);
-        dataRows = rowsToObjects(parseCSV(dataCsv));
-        currentRows = rowsToObjects(parseCSV(currentCsv));
+        if (SINGLE_SHEET) {
+          const dataCsv = await fetchCSV(DATA_URL);
+          dataRows = rowsToObjects(parseCSV(dataCsv));
+          const mergedCur = extractCurrentFromMergedRows(dataRows);
+          currentRows = mergedCur ? [mergedCur] : [];
+        } else {
+          const [dataCsv, currentCsv] = await Promise.all([
+            fetchCSV(DATA_URL),
+            fetchCSV(CURRENT_URL)
+          ]);
+          dataRows = rowsToObjects(parseCSV(dataCsv));
+          currentRows = rowsToObjects(parseCSV(currentCsv));
+        }
       }
 
       // Map players
@@ -372,47 +528,65 @@
         for (const n of a) if (!b.has(n)) return false;
         return true;
       })();
-      if (looksSane && stableNames) {
-        // Optionally enforce non-decreasing GS to avoid stale rollbacks
-        const merged = mergePlayersMonotonic(players, lastGoodPlayers);
-        lastGoodPlayers = merged;
-        computeDenseRanks(merged);
-        renderBoard(merged);
+      const passGuards = looksSane && (!ENFORCE_STABLE_NAMES || stableNames);
+      if (passGuards) {
+        const committed = stabilizeCommitPlayers(players);
+        lastGoodPlayers = committed;
+        computeDenseRanks(committed);
+        renderBoard(committed);
         updatedOk = true;
       } else if (lastGoodPlayers.length > 0) {
         computeDenseRanks(lastGoodPlayers);
         renderBoard(lastGoodPlayers);
       }
 
-      // Update header and description atomically using currentRows (+control coherence if present)
+      // Update header and description atomically using currentRows (+control coherence if required)
       if (currentRows && currentRows.length > 0) {
         const cur = currentRows[0];
         const hole = (cur.current_hole || cur.hole || '').toString();
         const par = (cur.current_par || cur.par || '').toString();
         const course = (cur.golf_course || cur['golf course'] || cur.golfCourse || cur.course || cur.description || cur.desc || '').toString().trim();
-        // If control provides a view of current hole/par, require match to avoid transient flips.
-        if (typeof controlCur === 'object' && controlCur) {
+        // If strict coherence requested, require control==current; otherwise prefer current, then stabilize over N cycles and apply monotonic guard.
+        if (REQUIRE_COHERENCE && typeof controlCur === 'object' && controlCur) {
           const ch = (controlCur.hole || '').toString();
           const cp = (controlCur.par || '').toString();
           if ((ch && hole && ch !== hole) || (cp && par && cp !== par)) {
             // mismatch detected; keep last good to avoid flicker
           } else {
-            const newHole = hole || ch;
-            const newPar = par || cp;
-            // Enforce monotonic non-decreasing hole to avoid rollbacks
-            if (MONOTONIC_HOLE && lastGoodCurrent && toInt(newHole) != null && toInt(lastGoodCurrent.hole) != null && toInt(newHole) < toInt(lastGoodCurrent.hole)) {
-              // ignore hole rollback
-            } else {
-              lastGoodCurrent = { hole: newHole, par: newPar, course };
-              updatedOk = true;
-            }
+          const newHole = hole || ch;
+          const newPar = par || cp;
+          // Enforce monotonic non-decreasing hole to avoid rollbacks
+          if (MONOTONIC_HOLE && lastGoodCurrent && toInt(newHole) != null && toInt(lastGoodCurrent.hole) != null && toInt(newHole) < toInt(lastGoodCurrent.hole)) {
+            // ignore hole rollback
+          } else {
+              const candidate = { hole: newHole, par: newPar, course };
+              if (!STABILIZE) { lastGoodCurrent = candidate; updatedOk = true; }
+              else {
+                if (pendingCurrent && eqCurrent(pendingCurrent, candidate)) {
+                  pendingCurrent.seen += 1;
+                } else {
+                  pendingCurrent = { ...candidate, seen: 1 };
+                }
+                if (!lastGoodCurrent) { lastGoodCurrent = candidate; updatedOk = true; pendingCurrent = null; }
+                else if (pendingCurrent.seen >= STABILIZE_CYCLES) { lastGoodCurrent = candidate; updatedOk = true; pendingCurrent = null; }
+              }
+          }
           }
         } else {
           if (MONOTONIC_HOLE && lastGoodCurrent && toInt(hole) != null && toInt(lastGoodCurrent.hole) != null && toInt(hole) < toInt(lastGoodCurrent.hole)) {
             // ignore hole rollback
           } else {
-            lastGoodCurrent = { hole, par, course };
-            updatedOk = true;
+            const candidate = { hole, par, course };
+            if (!STABILIZE) { lastGoodCurrent = candidate; updatedOk = true; }
+            else {
+              if (pendingCurrent && eqCurrent(pendingCurrent, candidate)) {
+                pendingCurrent.seen += 1;
+              } else {
+                pendingCurrent = { ...candidate, seen: 1 };
+              }
+              if (!lastGoodCurrent) { lastGoodCurrent = candidate; updatedOk = true; pendingCurrent = null; }
+              else if (pendingCurrent.seen >= STABILIZE_CYCLES) { lastGoodCurrent = candidate; updatedOk = true; pendingCurrent = null; }
+            }
           }
         }
       }
@@ -446,4 +620,73 @@
 
   // Initial load, then interval
   refresh();
+  // Update header NY time regularly
+  updateHeaderDatetimeNY();
+  setInterval(updateHeaderDatetimeNY, 1_000);
+
+  // Rotating banner (two images, 10s loop)
+  function setupBannerRotation() {
+    if (!elBanner) return;
+    const defaults = [
+      '1JquVOGqPf6aCL4hwL2jgKg6zgOtcxZeY',
+      '1JbbABA7_ePBkGlnBCDBDs6KLz2qIbavK'
+    ];
+
+    const fromParams = [];
+    const pIds = (params.get('bannerIds') || '').split(',').map(s => s.trim()).filter(Boolean);
+    const b1 = params.get('banner1') || '';
+    const b2 = params.get('banner2') || '';
+    const lone = params.get('banner') || '';
+    const loneId = params.get('bannerId') || '';
+
+    function extractIdFromDriveUrl(u) {
+      try {
+        const m = String(u).match(/\/file\/d\/([^/]+)\//);
+        return m ? m[1] : null;
+      } catch { return null; }
+    }
+
+    function asSource(s) {
+      if (!s) return null;
+      if (/^https?:\/\//i.test(s)) {
+        const id = extractIdFromDriveUrl(s);
+        if (id) return { primary: `https://lh3.googleusercontent.com/d/${id}=w340-h100`, fallback: `https://drive.google.com/uc?export=view&id=${id}` };
+        return { primary: s, fallback: s };
+      }
+      // assume drive id
+      return { primary: `https://lh3.googleusercontent.com/d/${s}=w340-h100`, fallback: `https://drive.google.com/uc?export=view&id=${s}` };
+    }
+
+    // Build list in priority order
+    const candidates = [];
+    if (pIds.length) candidates.push(...pIds);
+    if (b1) candidates.push(b1);
+    if (b2) candidates.push(b2);
+    if (lone || loneId) candidates.push(lone || loneId);
+    if (candidates.length === 0) candidates.push(...defaults);
+
+    const sources = candidates
+      .map(c => asSource(c))
+      .filter(Boolean);
+    if (sources.length === 0) return;
+
+    let idx = 0;
+    function apply(i) {
+      const src = sources[i % sources.length];
+      elBanner.loading = 'lazy';
+      elBanner.decoding = 'async';
+      elBanner.referrerPolicy = 'no-referrer';
+      elBanner.onerror = () => {
+        if (elBanner.src !== src.fallback) elBanner.src = src.fallback;
+        else elBanner.onerror = null;
+      };
+      elBanner.src = src.primary;
+    }
+
+    // First apply immediately, then rotate every 10s
+    apply(idx);
+    setInterval(() => { idx = (idx + 1) % sources.length; apply(idx); }, 10_000);
+  }
+
+  setupBannerRotation();
 })();
