@@ -1,0 +1,169 @@
+:root {
+  --navy-900: #0a1b33;
+  --navy-800: #0f2747;
+  --navy-700: #14345d;
+  --gold-500: #d4af37;
+  --gold-600: #c6a130;
+  --text: #e9eef6;
+  --muted: #a8b3c7;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --radius-lg: 16px;
+  --radius-md: 12px;
+}
+
+/* Transparent background for browser source overlays */
+html, body {
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  font-family: "Pretendard", "Pretendard Variable", -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  color: var(--text);
+}
+
+#overlay-root {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+}
+
+.dock.top-left {
+  position: fixed;
+  left: 4%;
+  top: 4%;
+}
+
+.dock.bottom-right {
+  position: fixed;
+  right: 4%;
+  bottom: 4%;
+}
+
+.panel {
+  display: grid;
+  grid-template-rows: min-content auto min-content; /* compact description */
+  width: 420px;
+  height: auto;
+  background: linear-gradient(180deg, rgba(10,27,51,0.92), rgba(20,52,93,0.92));
+  border: 1px solid rgba(212,175,55,0.6);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  backdrop-filter: blur(6px);
+}
+
+/* Top-left HUD for hole/par */
+.hud {
+  display: grid;
+  align-items: center;
+  justify-items: center;
+  padding: 10px 14px;
+  min-width: 100px;
+  background: linear-gradient(180deg, rgba(10,27,51,0.9), rgba(20,52,93,0.9));
+  border: 1px solid rgba(212,175,55,0.6);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+}
+
+.hud-hole .hole-number { font-size: 44px; font-weight: 800; line-height: 1; letter-spacing: 0.5px; }
+.hud-hole .hole-par { margin-top: 2px; font-size: 14px; font-weight: 700; color: var(--gold-500); }
+
+/* Header: current hole and par */
+.header {
+  display: grid;
+  align-items: center;
+  justify-items: center;
+  padding: 12px 16px 10px 16px;
+  background: linear-gradient(180deg, rgba(198,161,48,0.10), rgba(212,175,55,0.05));
+  border-bottom: 1px solid rgba(212,175,55,0.35);
+}
+
+.hole-number {
+  font-size: 56px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.5px;
+  color: var(--text);
+  text-shadow: 0 2px 0 rgba(0,0,0,0.25);
+}
+
+.hole-par {
+  margin-top: 4px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--gold-500);
+}
+
+/* Board (ranking grid) */
+.board {
+  display: grid;
+  grid-template-rows: auto auto; /* let body grow with content */
+}
+
+.board-head {
+  display: grid;
+  grid-template-columns: 44px 1fr 64px 64px; /* R | Name | SPT | GS */
+  gap: 0;
+  align-items: center;
+  padding: 6px 10px 6px 10px;
+  background: rgba(15,39,71,0.7);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.board-body {
+  overflow: visible;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 44px 1fr 64px 64px; /* match head */
+  align-items: center;
+  padding: 9px 10px 9px 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));
+  transition: background 200ms ease, transform 250ms ease;
+}
+
+.row:nth-child(odd) {
+  background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0));
+}
+
+.row:hover { background: rgba(255,255,255,0.05); }
+
+.col.rank { text-align: center; font-weight: 700; color: var(--gold-500); }
+.col.name { padding-left: 6px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.col.spt, .col.gs { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+
+.badge-up { color: #77e49b; }
+.badge-down { color: #ff8a8a; }
+
+/* Description panel: same height as board area */
+.description {
+  display: grid;
+  place-items: center;
+  padding: 8px 12px;
+  background: linear-gradient(180deg, rgba(15,39,71,0.65), rgba(20,52,93,0.6));
+  border-top: 1px solid rgba(212,175,55,0.25);
+  min-height: 44px; /* compact bar */
+}
+
+#desc-text {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Compact mode for very small heights */
+@media (max-height: 720px) {
+  .panel { height: 480px; width: 380px; }
+  .hole-number { font-size: 48px; }
+  .hole-par { font-size: 14px; }
+}

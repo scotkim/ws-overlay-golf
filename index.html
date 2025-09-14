@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Golf Overlay</title>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <!-- Pretendard font via CDN -->
+    <link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="overlay-root">
+      <section class="dock top-left">
+        <div class="hud hud-hole">
+          <div class="hole-number" id="tl-hole-number">-</div>
+          <div class="hole-par" id="tl-hole-par">PAR -</div>
+        </div>
+      </section>
+      <section class="dock bottom-right">
+        <div class="panel">
+          <div class="header" id="header">
+            <div class="hole-number" id="hole-number">-</div>
+            <div class="hole-par" id="hole-par">PAR -</div>
+          </div>
+          <div class="board" id="board">
+            <div class="board-head">
+              <div class="col rank">R</div>
+              <div class="col name">PLAYER</div>
+              <div class="col spt">SPT</div>
+              <div class="col gs">GS</div>
+            </div>
+            <div class="board-body" id="board-body"></div>
+          </div>
+          <div class="description" id="description">
+            <span id="desc-text">골프장 이름</span>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script src="script.js"></script>
+  </body>
+  </html>
